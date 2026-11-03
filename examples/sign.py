@@ -1,0 +1,115 @@
+# Copyright 2025 Adobe. All rights reserved.
+# This file is licensed to you under the Apache License,
+# Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+# or the MIT license (http://opensource.org/licenses/MIT),
+# at your option.
+# Unless required by applicable law or agreed to in writing,
+# this software is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+# implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+# specific language governing permissions and limitations under
+# each license.
+
+# This example shows how to sign an image with a C2PA manifest
+# using a callback signer and read the metadata added to the image.
+
+import os
+import c2pa
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.backends import default_backend
+
+# Note: Builder, Reader, Signer, and Context support being used as context managers
+# (with 'with' statements) to automatically clean up resources.
+
+fixtures_dir = os.path.join(os.path.dirname(__file__), "../tests/fixtures/")
+output_dir = os.path.join(os.path.dirname(__file__), "../output/")
+
+# Ensure the output directory exists.
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
+print("c2pa version:")
+version = c2pa.sdk_version()
+print(version)
+
+
+# Load certificates and private key (here from the test fixtures).
+# This is OK for development, but in production you should use a
+# secure way to load the certificates and private key.
+with open(fixtures_dir + "es256_certs.pem", "rb") as cert_file:
+    certs = cert_file.read()
+with open(fixtures_dir + "es256_private.key", "rb") as key_file:
+    key = key_file.read()
+
+# Define a callback signer function.
+def callback_signer_es256(data: bytes) -> bytes:
+    """Callback function that signs data using ES256 algorithm."""
+    private_key = serialization.load_pem_private_key(
+        key,
+        password=None,
+        backend=default_backend()
+    )
+    signature = private_key.sign(
+        data,
+        ec.ECDSA(hashes.SHA256())
+    )
+    return signature
+
+# Create a manifest definition as a dictionary.
+# This manifest follows the V2 manifest format.
+manifest_definition = {
+    "claim_generator_info": [{
+        "name": "python_example",
+        "version": "0.0.1",
+    }],
+    # Claims version 2 is the default, so the version
+    # number can be omitted.
+    # "claim_version": 2,
+    "format": "image/jpeg",
+    "title": "Python Example Image",
+    "ingredients": [],
+    "assertions": [
+        {
+            "label": "c2pa.actions",
+            "data": {
+                "actions": [
+                    {
+                        "action": "c2pa.created",
+                        "digitalSourceType": "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCreation"
+                    }
+                ]
+            }
+        }
+    ]
+}
+
+# Sign the image with the signer created above,
+# which will use the callback signer.
+print("\nSigning the image file...")
+
+# Use default Context and Settings.
+with c2pa.Context() as context:
+    with c2pa.Signer.from_callback(
+        callback_signer_es256,
+        c2pa.C2paSigningAlg.ES256,
+        certs.decode('utf-8'),
+        "http://timestamp.digicert.com"
+    ) as signer:
+        with c2pa.Builder(manifest_definition, context) as builder:
+            builder.sign_file(
+                fixtures_dir + "A.jpg",
+                output_dir + "A_signed.jpg",
+                signer
+            )
+
+    # Re-Read the signed image to verify
+    print("\nReading signed image metadata:")
+    with open(output_dir + "A_signed.jpg", "rb") as file:
+        with c2pa.Reader("image/jpeg", file, context=context) as reader:
+            # The validation state will depend on loaded trust settings.
+            # Without loaded trust settings,
+            # the manifest validation_state will be "Invalid".
+            print(reader.json())
+
+print("\nExample completed successfully!")

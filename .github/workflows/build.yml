@@ -1,0 +1,532 @@
+name: Build
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish'
+        required: true
+        default: 'false'
+
+permissions:
+  contents: read
+  packages: read
+  actions: read
+
+jobs:
+  read-version:
+    name: Read C2PA version
+    runs-on: ubuntu-latest
+    outputs:
+      c2pa-native-version: ${{ steps.read-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version from file
+        id: read-version
+        run: echo "version=$(cat c2pa-native-version.txt | tr -d '\r\n')" >> $GITHUB_OUTPUT
+
+  check-format:
+    name: Check code format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Check Python syntax
+        run: python3 -m py_compile src/c2pa/c2pa.py
+        continue-on-error: true
+
+      - name: Check code style with flake8
+        run: flake8 src/c2pa/c2pa.py
+        continue-on-error: true
+
+  tests-unix:
+    name: Unit tests for developer setup (Unix)
+    needs: read-version
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      contains(github.event.pull_request.labels.*.name, 'safe to test')
+
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-latest, ubuntu-latest, ubuntu-24.04-arm ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install project dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Install project development dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Prepare build directories
+        run: |
+          mkdir -p artifacts
+          mkdir -p src/c2pa/libs
+          rm -rf dist/* build/*
+
+      - name: Download native artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Ensure the token is being used
+          echo "Using GitHub token for authentication"
+          python3 scripts/download_artifacts.py ${{ needs.read-version.outputs.c2pa-native-version }}
+
+      - name: Install package in development mode
+        run: |
+          pip uninstall -y c2pa
+          pip install -e .
+
+      - name: Verify installation
+        run: |
+          python3 -c "from c2pa import C2paError; print('C2paError imported successfully')"
+
+      - name: Run tests
+        run: python3 ./tests/test_unit_tests.py
+
+  tests-windows:
+    name: Unit tests for developer setup (Windows)
+    needs: read-version
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      contains(github.event.pull_request.labels.*.name, 'safe to test')
+
+    runs-on: ${{ matrix.runs-on }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: windows-latest
+            python-version: "3.10"
+          - runs-on: windows-11-arm
+            python-version: "3.11"  # win-arm runner needs 3.11 atleast
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install ARM64 OpenSSL via vcpkg (Windows ARM64)
+        if: matrix.runs-on == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          # Pre-installed OpenSSL on runner fails build.
+          # Static OpenSSL to avoid runtime DLL load complexities.
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:arm64-windows-static-md
+          $vcpkgRoot = "$env:VCPKG_INSTALLATION_ROOT\installed\arm64-windows-static-md"
+          echo "OPENSSL_DIR=$vcpkgRoot" >> $env:GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+
+      - name: Install project dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Install project development dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Prepare build directories
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          New-Item -ItemType Directory -Force -Path src\c2pa\libs
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
+
+      - name: Check GitHub API rate limit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Checking GitHub API rate limit..."
+          curl -s -H "Authorization: token $env:GITHUB_TOKEN" https://api.github.com/rate_limit
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to check rate limit"
+            exit 1
+          }
+
+      - name: Download native artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Ensure the token is being used
+          echo "Using GitHub token for authentication"
+          python scripts\download_artifacts.py ${{ needs.read-version.outputs.c2pa-native-version }}
+
+      - name: Install package in development mode
+        run: |
+          pip uninstall -y c2pa
+          pip install -e .
+
+      - name: Verify installation
+        run: |
+          python -c "from c2pa import C2paError; print('C2paError imported successfully')"
+
+      - name: Run tests
+        run: python .\tests\test_unit_tests.py
+
+  build-linux-wheel:
+    name: Build Linux wheel
+    uses: ./.github/workflows/build-wheel.yml
+    needs: [tests-unix, read-version]
+    with:
+      python-version: "3.10"
+      architecture: ${{ matrix.target }}
+      artifact-name: wheels-linux-${{ matrix.target }}
+      runs-on: ${{ matrix.runs-on }}
+      c2pa-version: ${{ needs.read-version.outputs.c2pa-native-version }}
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64
+            runs-on: ubuntu-24.04
+          - target: aarch64
+            runs-on: ubuntu-24.04-arm
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      contains(github.event.pull_request.labels.*.name, 'safe to test')
+
+  test-built-linux-wheel:
+    name: Test Linux built wheel
+    needs: build-linux-wheel
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64
+            runs-on: ubuntu-24.04
+          - target: aarch64
+            runs-on: ubuntu-24.04-arm
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      contains(github.event.pull_request.labels.*.name, 'safe to test')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+      - name: Create and activate virtual environment
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+
+      - name: Install wheel for testing
+        run: |
+          source venv/bin/activate
+          pip install dist/c2pa_python-*.whl
+
+      - name: Run unittest tests on installed wheel
+        run: |
+          source venv/bin/activate
+          python ./tests/test_unit_tests.py
+
+      - name: Install pytest (in venv)
+        run: |
+          source venv/bin/activate
+          pip install pytest
+
+      - name: Run tests with pytest (venv)
+        run: |
+          source venv/bin/activate
+          venv/bin/pytest tests/test_unit_tests.py -v
+
+  build-windows-wheel:
+    name: Build Windows wheel
+    uses: ./.github/workflows/build-wheel.yml
+    needs: [tests-windows, read-version]
+    with:
+      python-version: "3.10"
+      architecture: ${{ matrix.target }}
+      artifact-name: wheels-windows-${{ matrix.target }}
+      runs-on: ${{ matrix.runs-on }}
+      c2pa-version: ${{ needs.read-version.outputs.c2pa-native-version }}
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      matrix:
+        include:
+          - target: x64
+            runs-on: windows-latest
+          - target: arm64
+            runs-on: windows-11-arm
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      contains(github.event.pull_request.labels.*.name, 'safe to test')
+
+  test-built-windows-wheel:
+    name: Test Windows built wheel
+    needs: build-windows-wheel
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x64
+            runs-on: windows-latest
+            python-version: "3.10"
+          - target: arm64
+            runs-on: windows-11-arm
+            python-version: "3.11"  # win-arm runner needs 3.11 atleast
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      contains(github.event.pull_request.labels.*.name, 'safe to test')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist
+
+      - name: Install ARM64 OpenSSL via vcpkg (Windows ARM64)
+        if: matrix.runs-on == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          # Static linking avoids runtime DLL load issues.
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:arm64-windows-static-md
+          $vcpkgRoot = "$env:VCPKG_INSTALLATION_ROOT\installed\arm64-windows-static-md"
+          echo "OPENSSL_DIR=$vcpkgRoot" >> $env:GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+
+      - name: Create and activate virtual environment
+        run: |
+          python -m venv venv
+          .\venv\Scripts\activate
+
+      - name: Install wheel for testing
+        run: |
+          .\venv\Scripts\activate
+          $wheel = Get-ChildItem -Path dist -Filter "c2pa_python-*.whl" | Select-Object -First 1
+          if (-not $wheel) { Write-Error "No wheel file found in dist directory"; exit 1 }
+          pip install $wheel.FullName
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests with pytest (venv)
+        run: |
+          .\venv\Scripts\activate
+          .\venv\Scripts\pytest .\tests\test_unit_tests.py -v
+
+  build-macos-wheel:
+    name: Build macOS wheels
+    uses: ./.github/workflows/build-wheel.yml
+    needs: [tests-unix, read-version]
+    with:
+      python-version: "3.10"
+      runs-on: ${{ matrix.runs-on }}
+      artifact-name: wheels-macos-${{ matrix.target }}
+      architecture: ${{ matrix.target }}
+      c2pa-version: ${{ needs.read-version.outputs.c2pa-native-version }}
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      matrix:
+        include:
+          - target: universal2
+            runs-on: macos-latest
+          - target: arm64
+            runs-on: macos-latest
+          - target: x86_64
+            runs-on: macos-15-intel
+
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      contains(github.event.pull_request.labels.*.name, 'safe to test')
+
+  test-built-macos-wheel:
+    name: Test macOS built wheels
+    needs: build-macos-wheel
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        include:
+          - target: arm64
+            runs-on: macos-latest
+          - target: x86_64
+            runs-on: macos-15-intel
+
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      contains(github.event.pull_request.labels.*.name, 'safe to test')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+      - name: Create and activate virtual environment
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+
+      - name: Install wheel for testing
+        run: |
+          source venv/bin/activate
+          pip install dist/c2pa_python-*.whl
+
+      - name: Run unittest tests on installed wheel
+        run: |
+          source venv/bin/activate
+          python ./tests/test_unit_tests.py
+
+      - name: Install pytest (in venv)
+        run: |
+          source venv/bin/activate
+          pip install pytest
+
+      - name: Run tests with pytest (venv)
+        run: |
+          source venv/bin/activate
+          venv/bin/pytest tests/test_unit_tests.py -v
+
+  sdist:
+    runs-on: ubuntu-latest
+    needs: [tests-unix, tests-windows]
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.author_association == 'COLLABORATOR' ||
+      github.event.pull_request.author_association == 'MEMBER' ||
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      contains(github.event.pull_request.labels.*.name, 'safe to test')
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Install dev dependencies for build
+        run: pip install -r requirements-dev.txt
+      - name: Build sdist
+        run: python -m build --sdist
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment: pypipublish
+    needs: [test-built-linux-wheel, test-built-macos-wheel, test-built-windows-wheel, sdist]
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create dist directory
+        run: mkdir -p dist
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: List downloaded artifacts
+        run: |
+          echo "Downloaded Artifacts"
+          ls -la dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # Uncomment to use TestPyPI
+          # repository-url: https://test.pypi.org/legacy/
+          verbose: true
+          # Uncomment below for test runs, otherwise fails on existing packages being reuploaded
+          skip-existing: true

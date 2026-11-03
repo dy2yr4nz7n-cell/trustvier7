@@ -1,0 +1,132 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+/artifacts
+scripts/artifacts
+tests/fixtures/temp_data
+
+# For the examples
+/output
+
+
+# C extensions
+*.so
+*.dll
+*.dylib
+
+# Virtual environment
+env/
+venv/
+ENV/
+.venv/
+.ENV/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Sphinx docs
+api-docs/api
+api-docs/_build
+api-docs/_static/*
+!api-docs/_static/version-selector.js
+api-docs/_preprocessed
+
+# PyInstaller
+# Usually these files are written by a Python script from a template
+# before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.coveragerc
+
+
+# pyenv
+.python-version
+
+
+# Environments
+.env
+.env.*
+*.env
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+*.old
+*.orig
+*.rej
+*.sublime-workspace
+
+# C2PA-specific
+target/
+*.pem
+*.key
+*.dylib
+*.dll
+*.so
+src/c2pa/libs/
+!tests/fixtures/*.pem
+!tests/fixtures/*.key
+
+# Memory profiling reports
+tests/perf/reports/*.html
+tests/perf/reports/*.bin
+
+# Threading failure logs
+tests/perf/reports/*.log
